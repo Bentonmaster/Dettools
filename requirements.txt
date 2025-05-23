@@ -1,0 +1,9 @@
+numpy
+opencv-python
+scipy
+# tensorrt (Note: TensorRT is usually installed separately, not via pip directly from PyPI for all systems. 
+# It often requires downloading from the NVIDIA Developer website and following platform-specific installation instructions.
+# Please refer to the official NVIDIA TensorRT documentation.)
+# pycuda (Note: PyCUDA installation is also often system-specific and may require building from source 
+# or using pre-built wheels compatible with your CUDA and Python environment. 
+# Please refer to the official PyCUDA documentation.)
