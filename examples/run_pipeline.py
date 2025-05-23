@@ -11,13 +11,33 @@ from src.pipeline.main_pipeline import ProcessingPipeline
 # TensorRTDetector will be mocked, so we don't strictly need to import it if it causes issues
 # in environments without TensorRT. However, for type hinting or if the mock inherits,
 # it might be useful. For now, we'll assume it's not a problem.
-from src.tensorrt_utils.infer import TensorRTDetector 
+from src.tensorrt_utils.infer import TensorRTDetector
 from src.tracking.tracker import SORTTracker
+from src.tracking.deepsort_tracker import DeepSORTTracker # For type hinting if needed
+from src.reid.feature_extractor import ReIDFeatureExtractor # For type hinting if needed
 import numpy as np
 import cv2 # For creating dummy data
 import argparse
 
 # --- Mock/Dummy Components ---
+
+class MockReIDFeatureExtractor:
+    def __init__(self, engine_path="dummy_reid.engine"):
+        self.engine_path = engine_path
+        self.feature_dim = 128 # Example feature dimension
+        print(f"MockReIDFeatureExtractor initialized with engine: {self.engine_path}")
+
+    def extract_features(self, cropped_object_images: list[np.ndarray]) -> np.ndarray:
+        num_objects = len(cropped_object_images)
+        if num_objects == 0:
+            return np.array([])
+        
+        # Simulate feature extraction
+        # In a real scenario, each image in cropped_object_images would be preprocessed
+        # and then passed to the ReID model.
+        print(f"MockReIDFeatureExtractor: Extracting dummy features for {num_objects} objects.")
+        dummy_features = np.random.rand(num_objects, self.feature_dim).astype(np.float32)
+        return dummy_features
 
 class MockTensorRTDetector:
     """
@@ -142,8 +162,13 @@ def create_dummy_video(file_path: str, width: int = 640, height: int = 480, num_
 def main():
     parser = argparse.ArgumentParser(description="Run ProcessingPipeline with dummy data.")
     parser.add_argument('--type', type=str, choices=['image', 'video', 'all'], default='all',
-                        help="Specify whether to process an 'image', a 'video', or 'all'.")
+                        help="Specify whether to process an 'image', a 'video', or 'all'. Default: 'all'.")
+    parser.add_argument('--tracker_type', type=str, choices=['SORT', 'DeepSORT'], default='SORT',
+                        help="Specify the tracker type to use. Default: 'SORT'.")
     args = parser.parse_args()
+
+    print(f"\nSelected processing type: {args.type}")
+    print(f"Selected tracker type: {args.tracker_type}")
 
     # Setup paths
     base_dir = os.path.dirname(__file__)
@@ -158,42 +183,63 @@ def main():
     dummy_engine_path = os.path.join(temp_data_dir, "dummy.engine")
     with open(dummy_engine_path, 'w') as f: # Create an empty dummy engine file
         f.write("This is a dummy TensorRT engine file.")
+    dummy_reid_engine_path = os.path.join(temp_data_dir, "dummy_reid.engine")
+    with open(dummy_reid_engine_path, 'w') as f: # Create an empty dummy reid engine file
+        f.write("This is a dummy ReID engine file.")
+
 
     dummy_image_input_path = os.path.join(temp_data_dir, "dummy_input.png")
-    dummy_image_output_path = os.path.join(temp_data_dir, "dummy_output_processed.png")
+    dummy_image_output_path = os.path.join(temp_data_dir, f"dummy_output_image_{args.tracker_type}.png")
     
     dummy_video_input_path = os.path.join(temp_data_dir, "dummy_input.avi")
-    dummy_video_output_path = os.path.join(temp_data_dir, "dummy_output_processed.avi")
+    dummy_video_output_path = os.path.join(temp_data_dir, f"dummy_output_video_{args.tracker_type}.avi")
 
     # Instantiate components
     mock_detector = MockTensorRTDetector(engine_path=dummy_engine_path)
-    # Use fairly standard SORT parameters
-    sort_tracker = SORTTracker(max_age=7, min_hits=3, iou_threshold=0.3) 
+    mock_reid_model = MockReIDFeatureExtractor(engine_path=dummy_reid_engine_path)
+
+    sort_config = {'max_age': 30, 'min_hits': 3, 'iou_threshold': 0.3}
+    deepsort_config = {
+        'max_age': 70, 
+        'min_hits_to_confirm': 3, 
+        'iou_threshold': 0.7, # Note: DeepSORT often uses smaller IoU for cascade, this is for primary matching
+        'max_cosine_distance': 0.2, 
+        'nn_budget': 100
+    }
     
-    pipeline = ProcessingPipeline(detector=mock_detector, tracker=sort_tracker)
+    reid_for_pipeline = mock_reid_model if args.tracker_type == 'DeepSORT' else None
+    
+    print(f"\nInitializing ProcessingPipeline with {args.tracker_type} tracker.")
+    pipeline = ProcessingPipeline(
+        detector=mock_detector,
+        tracker_type=args.tracker_type,
+        sort_tracker_config=sort_config,
+        deepsort_tracker_config=deepsort_config,
+        reid_model=reid_for_pipeline
+    )
 
     # Processing
     if args.type in ['image', 'all']:
-        print("\n--- Processing Dummy Image ---")
+        print(f"\n--- Processing Dummy Image with {args.tracker_type} ---")
         create_dummy_image(dummy_image_input_path)
         print(f"Attempting to process image: {dummy_image_input_path} -> {dummy_image_output_path}")
         try:
             pipeline.process_image(dummy_image_input_path, dummy_image_output_path)
             print(f"Image processing complete. Output: {dummy_image_output_path}")
         except Exception as e:
-            print(f"Error during image processing: {e}")
+            print(f"Error during image processing with {args.tracker_type}: {e}")
             import traceback
             traceback.print_exc()
 
     if args.type in ['video', 'all']:
-        print("\n--- Processing Dummy Video ---")
+        print(f"\n--- Processing Dummy Video with {args.tracker_type} ---")
         create_dummy_video(dummy_video_input_path, num_frames=60, fps=15) # A bit longer video
         print(f"Attempting to process video: {dummy_video_input_path} -> {dummy_video_output_path}")
         try:
             pipeline.process_video(dummy_video_input_path, dummy_video_output_path)
             print(f"Video processing complete. Output: {dummy_video_output_path}")
         except Exception as e:
-            print(f"Error during video processing: {e}")
+            print(f"Error during video processing with {args.tracker_type}: {e}")
             import traceback
             traceback.print_exc()
 
@@ -204,7 +250,31 @@ def main():
     #     print(f"Removed temporary directory: {temp_data_dir}")
     # except OSError as e:
     #     print(f"Error removing {temp_data_dir}: {e.strerror}")
-    print(f"\nScript finished. Check {temp_data_dir} for output files if cleanup is disabled.")
+
+    # More specific cleanup based on generated files
+    print("\n--- Cleanup ---")
+    files_to_remove = [
+        dummy_engine_path, dummy_reid_engine_path,
+        dummy_image_input_path, dummy_video_input_path,
+        os.path.join(temp_data_dir, f"dummy_output_image_SORT.png"),
+        os.path.join(temp_data_dir, f"dummy_output_video_SORT.avi"),
+        os.path.join(temp_data_dir, f"dummy_output_image_DeepSORT.png"),
+        os.path.join(temp_data_dir, f"dummy_output_video_DeepSORT.avi"),
+    ]
+    for f_path in files_to_remove:
+        if os.path.exists(f_path):
+            try:
+                os.remove(f_path)
+                # print(f"Removed {f_path}")
+            except OSError as e:
+                print(f"Error removing {f_path}: {e.strerror}")
+    
+    # Optionally remove the directory if empty, or if you want to ensure it's fully cleaned.
+    # For now, just removing specific files. If you want to remove the whole dir:
+    # if os.path.exists(temp_data_dir) and not os.listdir(temp_data_dir): # Only if empty
+    #     shutil.rmtree(temp_data_dir)
+
+    print(f"\nScript finished. Check {temp_data_dir} for any remaining output files if cleanup was partial or disabled.")
 
 if __name__ == '__main__':
     main()

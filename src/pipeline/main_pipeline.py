@@ -1,6 +1,8 @@
 from src.io.rw import read_image, write_image, read_video, write_video
 from src.tensorrt_utils.infer import TensorRTDetector # Assuming this class exists
-from src.tracking.tracker import SORTTracker # Assuming this class exists
+from src.tracking.tracker import SORTTracker 
+from src.tracking.deepsort_tracker import DeepSORTTracker # New import
+from src.reid.feature_extractor import ReIDFeatureExtractor # New import
 from src.utils.visualization import draw_detections, draw_tracks
 import numpy as np
 import cv2 # For getting video properties like FPS, frame_size
@@ -10,16 +12,34 @@ class ProcessingPipeline:
     A pipeline for processing images or videos using object detection and tracking.
     """
 
-    def __init__(self, detector: TensorRTDetector, tracker: SORTTracker):
+    def __init__(self, 
+                 detector: TensorRTDetector, 
+                 tracker_type: str = 'SORT', 
+                 sort_tracker_config: dict = None, 
+                 deepsort_tracker_config: dict = None,
+                 reid_model: ReIDFeatureExtractor = None):
         """
         Initializes the ProcessingPipeline.
 
         Args:
             detector: An instance of TensorRTDetector for object detection.
-            tracker: An instance of SORTTracker for object tracking.
+            tracker_type: Type of tracker to use ('SORT' or 'DeepSORT').
+            sort_tracker_config: Configuration dictionary for SORTTracker.
+            deepsort_tracker_config: Configuration dictionary for DeepSORTTracker.
+            reid_model: An instance of ReIDFeatureExtractor (required for DeepSORT).
         """
         self.detector = detector
-        self.tracker = tracker
+        self.reid_model = reid_model # Store reid_model
+        self.tracker_type = tracker_type
+
+        if self.tracker_type == 'SORT':
+            self.tracker = SORTTracker(**(sort_tracker_config or {}))
+        elif self.tracker_type == 'DeepSORT':
+            if self.reid_model is None:
+                raise ValueError("ReIDFeatureExtractor instance must be provided for DeepSORTTracker.")
+            self.tracker = DeepSORTTracker(reid_model=self.reid_model, **(deepsort_tracker_config or {}))
+        else:
+            raise ValueError(f"Invalid tracker_type: {self.tracker_type}. Must be 'SORT' or 'DeepSORT'.")
 
     def _convert_detections_to_sort_format(self, detections: list) -> np.ndarray:
         """
@@ -64,18 +84,27 @@ class ProcessingPipeline:
         np_detections = self._convert_detections_to_sort_format(detections)
 
         # Update the tracker with these detections
-        # tracks will be [x1, y1, x2, y2, track_id]
-        tracks = self.tracker.update(np_detections)
+        # tracks will be [x1, y1, x2, y2, track_id] for SORT
+        # or [x1, y1, x2, y2, track_id, score] for DeepSORT (as planned)
+        if self.tracker_type == 'DeepSORT':
+            tracks = self.tracker.update(np_detections, image_data)
+        else: # SORT
+            tracks = self.tracker.update(np_detections)
 
         # Visualize
         output_image = image_data.copy() # Make a copy to draw on
         if len(detections) > 0: # Ensure there are detections to draw
             output_image = draw_detections(output_image, detections)
+        
         if len(tracks) > 0: # Ensure there are tracks to draw
-            output_image = draw_tracks(output_image, tracks)
+            vis_tracks = tracks
+            # Slice off score for visualization if DeepSORT output includes it (6 columns)
+            if self.tracker_type == 'DeepSORT' and tracks.shape[1] == 6:
+                vis_tracks = tracks[:, :5]
+            output_image = draw_tracks(output_image, vis_tracks)
         
         write_image(output_path, output_image)
-        print(f"Processed image saved to {output_path}. Tracks: {tracks}")
+        print(f"Processed image saved to {output_path}. Tracks: {tracks[:, :5] if tracks.ndim > 1 and tracks.shape[1] > 4 else tracks}")
 
 
     def process_video(self, video_path: str, output_path: str):
@@ -118,18 +147,27 @@ class ProcessingPipeline:
             np_detections = self._convert_detections_to_sort_format(detections)
             
             # Update tracker
-            tracks = self.tracker.update(np_detections)
+            if self.tracker_type == 'DeepSORT':
+                tracks = self.tracker.update(np_detections, frame)
+            else: # SORT
+                tracks = self.tracker.update(np_detections)
 
             # Visualize
             output_frame = frame.copy() # Make a copy to draw on
             if len(detections) > 0: # Ensure there are detections to draw
                 output_frame = draw_detections(output_frame, detections)
+            
             if len(tracks) > 0: # Ensure there are tracks to draw
-                output_frame = draw_tracks(output_frame, tracks)
+                vis_tracks = tracks
+                # Slice off score for visualization if DeepSORT output includes it (6 columns)
+                if self.tracker_type == 'DeepSORT' and tracks.shape[1] == 6:
+                    vis_tracks = tracks[:, :5]
+                output_frame = draw_tracks(output_frame, vis_tracks)
             
             processed_frames.append(output_frame)
             if tracks.shape[0] > 0:
-                print(f"  Frame {frame_count} - Tracks: {tracks[:,4]}") # Print track IDs
+                # Print track IDs (column 4 for both SORT and DeepSORT after potential slicing)
+                print(f"  Frame {frame_count} - Tracks IDs: {tracks[:,4]}")
 
         if not processed_frames:
             print(f"Warning: No frames were processed from {video_path}.")
@@ -182,44 +220,80 @@ if __name__ == '__main__':
             return detections
 
     # Dummy/Mock SORTTracker (already has a functional one in tracker.py)
-    # from src.tracking.tracker import SORTTracker 
+    # from src.tracking.tracker import SORTTracker # Now potentially DeepSORTTracker too
+
+    # Dummy/Mock ReIDFeatureExtractor
+    class MockReIDFeatureExtractor:
+        def __init__(self, engine_path="dummy_reid.engine"):
+            print(f"MockReIDFeatureExtractor initialized with {engine_path}")
+            # Simulate expected feature dimension
+            self.feature_dim = 128 
+
+        def extract_features(self, cropped_object_images: list) -> np.ndarray:
+            if not cropped_object_images:
+                return np.array([])
+            num_objects = len(cropped_object_images)
+            print(f"MockReID: Extracting features for {num_objects} images (dummy).")
+            return np.random.rand(num_objects, self.feature_dim).astype(np.float32)
 
     try:
         # Create dummy files for testing
         # Create a dummy engine file (empty)
-        with open("dummy.engine", "w") as f:
-            f.write("dummy engine content")
+        with open("dummy_det.engine", "w") as f: f.write("dummy detector engine content")
+        with open("dummy_reid.engine", "w") as f: f.write("dummy reid engine content")
+
         
         # Create a dummy image
         dummy_image_data = np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)
         write_image("dummy_input.png", dummy_image_data)
 
         # Create a dummy video
-        dummy_frames = [np.random.randint(0, 256, (240, 320, 3), dtype=np.uint8) for _ in range(10)] # 10 frames
-        # Ensure dummy_video_output directory exists or is handled by write_video
-        # For simplicity, let's assume current dir is fine.
+        dummy_frames = [np.random.randint(0, 256, (240, 320, 3), dtype=np.uint8) for _ in range(10)]
         write_video("dummy_input.avi", iter(dummy_frames), 10, (320, 240))
 
-
-        # Initialize components
-        mock_detector = MockTensorRTDetector(engine_path="dummy.engine")
-        # Using the actual SORTTracker
-        sort_tracker = SORTTracker(max_age=5, min_hits=2, iou_threshold=0.3) 
+        # Initialize components for SORT
+        print("\n--- Testing with SORT Tracker ---")
+        mock_detector_sort = MockTensorRTDetector(engine_path="dummy_det.engine")
+        sort_config = {'max_age': 5, 'min_hits': 2, 'iou_threshold': 0.3}
         
-        pipeline = ProcessingPipeline(detector=mock_detector, tracker=sort_tracker)
+        pipeline_sort = ProcessingPipeline(detector=mock_detector_sort, 
+                                           tracker_type='SORT',
+                                           sort_tracker_config=sort_config)
 
-        # Test image processing
-        print("\nTesting image processing...")
-        pipeline.process_image(image_path="dummy_input.png", output_path="dummy_output.png")
-        print("Image processing test finished.")
+        # Test image processing with SORT
+        print("\nTesting SORT image processing...")
+        pipeline_sort.process_image(image_path="dummy_input.png", output_path="dummy_output_sort.png")
+        print("SORT Image processing test finished.")
 
-        # Test video processing
-        print("\nTesting video processing...")
-        pipeline.process_video(video_path="dummy_input.avi", output_path="dummy_output.avi")
-        print("Video processing test finished.")
+        # Test video processing with SORT
+        print("\nTesting SORT video processing...")
+        pipeline_sort.process_video(video_path="dummy_input.avi", output_path="dummy_output_sort.avi")
+        print("SORT Video processing test finished.")
+
+        # Initialize components for DeepSORT
+        print("\n\n--- Testing with DeepSORT Tracker ---")
+        mock_detector_deepsort = MockTensorRTDetector(engine_path="dummy_det.engine")
+        mock_reid_model = MockReIDFeatureExtractor(engine_path="dummy_reid.engine")
+        deepsort_config = {'max_age': 30, 'min_hits_to_confirm': 2, 'iou_threshold': 0.5, 'max_cosine_distance':0.3}
+
+        pipeline_deepsort = ProcessingPipeline(detector=mock_detector_deepsort,
+                                               tracker_type='DeepSORT',
+                                               deepsort_tracker_config=deepsort_config,
+                                               reid_model=mock_reid_model)
+        
+        # Test image processing with DeepSORT
+        print("\nTesting DeepSORT image processing...")
+        pipeline_deepsort.process_image(image_path="dummy_input.png", output_path="dummy_output_deepsort.png")
+        print("DeepSORT Image processing test finished.")
+
+        # Test video processing with DeepSORT
+        print("\nTesting DeepSORT video processing...")
+        pipeline_deepsort.process_video(video_path="dummy_input.avi", output_path="dummy_output_deepsort.avi")
+        print("DeepSORT Video processing test finished.")
+
 
     except ImportError as e:
-        print(f"ImportError: {e}. Make sure all custom modules are accessible.")
+        print(f"ImportError: {e}. Make sure all custom modules (src.*) are accessible.")
         print("This example might fail if src.* modules are not in PYTHONPATH or structure is different.")
     except FileNotFoundError as e:
         print(f"FileNotFoundError: {e}. A dummy file might be missing.")
@@ -232,9 +306,12 @@ if __name__ == '__main__':
     finally:
         # Clean up dummy files
         import os
-        if os.path.exists("dummy.engine"): os.remove("dummy.engine")
+        if os.path.exists("dummy_det.engine"): os.remove("dummy_det.engine")
+        if os.path.exists("dummy_reid.engine"): os.remove("dummy_reid.engine")
         if os.path.exists("dummy_input.png"): os.remove("dummy_input.png")
-        if os.path.exists("dummy_output.png"): os.remove("dummy_output.png")
+        if os.path.exists("dummy_output_sort.png"): os.remove("dummy_output_sort.png")
+        if os.path.exists("dummy_output_deepsort.png"): os.remove("dummy_output_deepsort.png")
         if os.path.exists("dummy_input.avi"): os.remove("dummy_input.avi")
-        if os.path.exists("dummy_output.avi"): os.remove("dummy_output.avi")
+        if os.path.exists("dummy_output_sort.avi"): os.remove("dummy_output_sort.avi")
+        if os.path.exists("dummy_output_deepsort.avi"): os.remove("dummy_output_deepsort.avi")
         print("\nCleaned up dummy files.")
